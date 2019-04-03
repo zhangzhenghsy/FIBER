@@ -9,13 +9,89 @@ import sys
 from sym_table import Sym_Table
 from src_parser import *
 import time
-
+import json
+from ext_sig import *
+import re
 #TODO List:
 #(1) Patches with '#if' '#else', e.g. CVE-2015-8839
 
 dbg_out = True
 #The goal of this function is to generate a list, each entry is line numbers in source kernel files that we can use to
 #extract a signature. This is generated according to the patch information and simply specify the changed lines as candidates.
+#tem_o = '/home/zheng/fiber/addr2line/tmp_oAOSP2018'
+ADDR2LINE = '/home/zheng/fiberaarch64-linux-android-4.9/bin/aarch64-linux-android-addr2line'
+def find_housefunc(funcname):
+    found=False
+    housefunc=""
+    housefuncs=set()
+    trim = lambda x:x[:-1] if x[-1] == '\n' else x
+    tmp_o=sys.argv[6].split(".")[0]
+    tmp_o='/home/zheng/fiberweiteng/addr2line/tmp_o'+tmp_o
+    print tmp_o
+    try:
+        ft=open(tmp_o,'r')
+        ft.close()
+    except Exception as ex:
+        print "\nno tmp_o file!\n"
+        print "reason:",ex
+        exit()
+        '''
+        vmlinux=sys.argv[5]
+        #st=0xffffffc000080000
+        #ed=0xffffffc001ceb000
+        global sym_tabs 
+        (st,ed)=sym_tabs[0].startandend()
+        print (hex(st),hex(ed))
+        image=sys.argv[5]
+        with open('tmp_i','w') as f:
+            for i in range(st,ed,4):
+                f.write('%x\n' % i)
+        with open('tmp_i','r') as fi:
+            with open(tmp_o,'w') as fo:
+                subprocess.call([ADDR2LINE,'-afip','-e',image],stdin=fi,stdout=fo)
+                '''
+    with open(tmp_o,'r') as f:
+        for l in f:
+            l=trim(l)
+            if l.startswith('0x'):
+                found=False
+                if housefunc:
+                    housefuncs.add(housefunc)
+                    housefunc=""
+                tokens = l.split(':')
+                func = tokens[1].split(' ')[1]
+                if func==funcname:
+                    found=True
+            elif l.startswith(' (inlined'):
+                if found:
+                    tokens = l.split(':')
+                    func = tokens[0].split(' ')[3]
+                    if housefunc:
+                        housefunc=housefunc+"--"+str(func)
+                    else:
+                        housefunc=str(func)
+    '''
+    global sym_tabs
+    def housefuncfilter(housefunc):
+        housefun=housefunc.split("--")[-1]
+        if not sym_tabs[1].lookup_func_name(housefun):
+            return False
+        return True
+    if len(sym_tabs)>1:
+        housefuncs=set([housefunc for housefunc in housefuncs if housefuncfilter(housefunc)])
+    '''
+    minlen=10
+    for housefunc in housefuncs:
+        length=len(housefunc.split("--"))
+        if length<minlen:
+            minlen=length
+    for housefunc in housefuncs:
+        length=len(housefunc.split("--"))
+        if length==minlen:
+            return housefunc
+    return None
+
+
 def generate_line_candidates(p_inf):
     cands = []
     for k in p_inf:
@@ -77,15 +153,157 @@ def _get_tags_for_lines(l_range,f_inf):
 ext_inline_list = ['memset','memcpy']
 def func_exists(n):
     global sym_tabs
-    if n in ext_inline_list:
+#    if n in ext_inline_list:
+#        return False
+    if not sym_tabs:
+        return True
+    if not sym_tabs[0].lookup_func_name(n):
         return False
+    return True
+
+def func_exists_target(n):
+    global sym_tabs
+#    if n in ext_inline_list:
+#        return False
+    if not sym_tabs:
+         return True
+    if not sym_tabs[1].lookup_func_name(n):
+        return False
+    return True
+#zz: test inline or not in reference kernel
+def func_exist_insn(name, house_func_name,lnos):
+    #print 'target_func_name:',name
+    #print 'house_func_name:',house_func_name
+    #print 'lnos:',lnos,'\n\n'
+    global sym_tabs
+    if not sym_tabs:
+        return True
+    if not sym_tabs[0].lookup_func_name(name):
+        return False
+    if not sym_tabs[1].lookup_func_name(name):
+        return False
+    symbol_table=sym_tabs[0]
+    BASE = symbol_table.probe_arm64_kernel_base()
+    code_segments = symbol_table.get_code_segments(BASE)
+    b = load_kernel_image(sys.argv[4],ARCH,BASE,segments=code_segments)
+    (ty,addr_define,size)=symbol_table.lookup_func_name(name)
+    entry = symbol_table.lookup_func_name(house_func_name)
+    if entry is None:
+        print '\n\n\n house_func_name',house_func_name
+    (ty,func_addr,func_size) = entry
+    addrs = get_addrs_from_lines_aarch64(sys.argv[5],house_func_name,func_addr,func_addr+func_size,lnos)
+    aset = set()
+    for ln in sorted(list(addrs)):
+        aset = aset.union(addrs[ln])
+    #zz:adaptation:sometimes debug information is not complete no corresponding addrs
+    #print '\n\n',len(aset),'\n\n'
+    if len(aset)==0:
+        return 2
+    #for addr in aset:
+    #    print hex(addr)
+    start=func_addr
+    end=func_addr+func_size
+    cfg = get_cfg_acc(b,start,end)
+    #print '\n cfg = get_cfg_acc(b,start,end)'
+    #print 'func_addr=: ', hex(start), '  end=',hex(end)
+    func_cfg = get_func_cfg(cfg,start,proj=b,sym_tab=symbol_table,simplify=True)
+    addrs=aset
+    result=False
+    reg_name = lambda off: proj.arch.translate_register_name(offset=off)
+    while bool(addrs):
+        #zz: be careful here, we still need the addr as start addr.
+        addr = addrs.pop()
+        addrs.add(addr)
+        n = get_node_by_addr(cfg,addr,any_addr=True)
+        #if n is None:
+        #    addrs.remove(addr)
+        #    continue
+        Addr=n.addr 
+        size=n.size
+        proj=b
+        irsb = proj.factory.block(Addr,size=size,opt_level=0).vex
+        ss = irsb.statements
+        index = {}
+        for i in range(len(ss)):
+            if ss[i].tag=='Ist_IMark':
+                index[ss[i].addr] = i
+        ins_list = [x for x in addrs if index.has_key(x)]
+        for addr in ins_list:
+            addrs.remove(addr)
+            for i in range(index[addr]+1,len(ss)):
+                stmt = ss[i]
+                if stmt.tag == 'Ist_Put':
+                    reg = reg_name(stmt.offset)
+                    if reg in ('ip','pc'):
+                        e = stmt.expressions
+                        if not hasattr(e[0],'con'):
+                            with open('targetip_is_register','a') as f:
+                                f.write('target_func='+str(name)+'house_func='+str(house_func_name)+'\n')
+                                f.write('\n'+str(stmt))
+                            continue
+                        target=e[0].con.value
+                        #print 'i=',i
+                        #print 'target=',hex(target),'\n'
+                        if target==addr_define:
+                            result=True
+                            return result
+                elif stmt.tag == 'Ist_IMark':
+                    break
+    return result
+
+#zz:test the function inline in target binary
+def func_exist_insn_target(name, house_func_name,op):
+    global sym_tabs
     if not sym_tabs:
         return True
     for s in sym_tabs:
-        if not s.lookup_func_name(n):
+        if not s.lookup_func_name(name):
             return False
-    return True
-
+    symbol_table=sym_tabs[1]
+    if op==1:
+        symbol_table=sym_tabs[0]
+    BASE = symbol_table.probe_arm64_kernel_base()
+    code_segments = symbol_table.get_code_segments(BASE)
+    if op==1:
+        b = load_kernel_image(sys.argv[4],ARCH,BASE,segments=code_segments)
+    else:
+        b = load_kernel_image(sys.argv[7],ARCH,BASE,segments=code_segments)
+    (ty,addr_define,size)=symbol_table.lookup_func_name(name)
+    #print "L245 (ty,addr_define,size)", (ty,addr_define,size)
+    entry = symbol_table.lookup_func_name(house_func_name)
+    #print "house_func_name: ",house_func_name
+    #print "L247 entry:",entry
+    (ty,func_addr,func_size) = entry
+    start=func_addr
+    end=func_addr+func_size
+    cfg = get_cfg_acc(b,start,end)
+    func_cfg = get_func_cfg(cfg,start,proj=b,sym_tab=symbol_table,simplify=True)
+    reg_name = lambda off: proj.arch.translate_register_name(offset=off)
+    addr=start
+    while addr<end:
+        n = get_node_by_addr(cfg,addr,any_addr=True)
+        if n is None:
+            with open('meetMSR','a') as f:
+                f.write('name='+name+'    housefunc='+house_func_name+'    house_func_addr='+str(hex(func_addr))+'    addr_define='+str(hex(addr_define))+'    addr'+str(hex(addr)))
+            break
+        Addr=n.addr
+        size=n.size
+        proj=b
+        irsb = proj.factory.block(Addr,size=size,opt_level=0).vex
+        #irsb.pp()
+        ss = irsb.statements
+        for i in range(len(ss)):
+            stmt = ss[i]
+            if stmt.tag == 'Ist_Put':
+                reg = reg_name(stmt.offset)
+                if reg in ('ip','pc'):
+                    e = stmt.expressions
+                    if hasattr(e[0],'con'):
+                        target=e[0].con.value
+                        if target==addr_define:
+                            return True
+        addr=addr+size
+    return False
 fmt_func = ('pr_err','pr_dbg','pr_info','printk','snprintf','write_str')
 def _is_fmt_func(name):
     #First we have a whitelist.
@@ -285,6 +503,12 @@ def trim_line_candidates(cand,patch):
     #if they are unique.
     c_file = cand['file']
     c_func = cand['func']
+    housefuncinline=False#housefunc here means c_func
+    #print "L480 cand: ",cand
+    if 'housefuncname' in cand:
+        c_housefunc=cand['housefuncname']
+        housefuncinline=True
+        print c_housefunc
     fi = func_inf[(c_file,c_func,cand['func_range'][0])]
     tags = _get_tags_for_lines(cand['line'],fi)
     res_cand = []
@@ -299,7 +523,71 @@ def trim_line_candidates(cand,patch):
         name = inf['name']
         args = inf['args']
         rang = inf['range']
-        inlined = not func_exists(name)
+        lnos=set([])
+        for ele in rang:
+            lnos.add((ele+1))
+        #inlined = func_exist_insn(name, c_func,lnos)
+        inlined = func_exists(name)
+        #inlined=not func_exist_insn_target(name, c_func,1)
+        inlined_simple = not func_exists(name)
+        if housefuncinline:
+            inlined_complex= not func_exist_insn_target(name, c_housefunc,1)
+        else:
+            #print "L505 name: ",name, "  c_func: ",c_func
+            inlined_complex= not func_exist_insn_target(name, c_func,1)
+        #inlined_complex=inlined
+        if inlined==2:
+            inlined=inlined_complex
+        else:
+            inlined= not inlined
+        global pretargetfunc
+        #print 'inlined=',inlined
+        if name!=pretargetfunc:
+            pretargetfunc=name
+            #print name
+            #print c_func
+            if housefuncinline:
+                inlined_target=not func_exist_insn_target(name, c_housefunc,0)
+            else:
+                inlined_target=not func_exist_insn_target(name, c_func,0)
+            inlined_target_simple=not func_exists_target(name)
+            if inlined != inlined_complex:
+                with open('referenceinlinechange','a') as f:
+                    f.write('target_func='+str(name)+'     house_func='+str(c_func)+'   lnos'+repr(lnos)+'\n')
+                    f.write('in reference kernel inline='+str(inlined)+'    simple_inline='+str(inlined_simple)+'  complex_inline='+str(inlined_complex)+'\n')
+            if inlined!=inlined_simple or inlined_target!= inlined_target_simple:
+                with open('functioninlinechange','a') as f:
+                    f.write('target_func='+str(name)+'     house_func='+str(c_func)+'\n')
+                    f.write('in reference kernel inline='+str(inlined)+'    simple_inline='+str(inlined_simple)+'  complex_inline='+str(inlined_complex)+'\n')
+                    f.write('in target kernel inline='+str(inlined_target)+'    simple_inline='+str(inlined_target_simple)+'\n')
+
+            #print 'target func=',name,'house func=',c_func
+            with open('housefuncexist','a') as f:
+                f.write('target_func='+str(name)+'     house_func='+str(c_func)+'\n')
+                if housefuncinline:
+                    f.write('househouse_func='+str(c_housefunc)+'\n')
+                if inlined:
+                    if inlined_target:
+                        #print 'inline in reference kernel, inline in target kernel'
+                        f.write('inline in reference kernel, inline in target kernel'+'\n')
+                        global inlineinline
+                        inlineinline+=1
+                    else:
+                        #print 'inline in reference kernel,not inline in target kernel'
+                        f.write('inline in reference kernel,not inline in target kernel'+'\n')
+                        global inlinenotinline
+                        inlinenotinline+=1
+                else:
+                    if inlined_target:
+                        #print 'not inline in reference kernel, inline in target kernel'
+                        f.write('not inline in reference kernel, inline in target kernel'+'\n')
+                        global notinlineinline
+                        notinlineinline+=1
+                    else:
+                        #print 'not inline in reference kernel, not inline in target kernel'
+                        f.write('not inline in reference kernel, not inline in target kernel'+'\n')
+                        global notinlinenotinline
+                        notinlinenotinline+=1
         fmt_str_patch = _is_fmt_str_patch(src_map[c_file],patch,inf)
         changed_args = _get_changed_args(src_map[c_file],patch,inf)
         func_name_unique = test_uniqueness(src_map[c_file],name+'(',patch,strip=True) 
@@ -320,7 +608,7 @@ def trim_line_candidates(cand,patch):
                 c['type'] = 'fmt_str' if not inlined else 'fmt_str_inline'
                 res_cand.append(c)
             else:
-                cs = add_context_no_guarantee(src_map[c_file],rang,patch,fi)
+                cs = add_context_no_guarantee(src_map[c_file],rang,patch,fi,c_func)
                 for c in cs:
                     c['file'] = c_file
                     c['func'] = c_func
@@ -355,7 +643,7 @@ def trim_line_candidates(cand,patch):
             #Besides, some arguments have been explicitly changed by the patch. 
             #Although the call-site passed uniqueness test, we still try to add some contexts for:
             #(1) performance opt (2) in case our string comparison based uniqueness test is not correct.
-            cs = add_context_no_guarantee(src_map[c_file],rang,patch,fi)
+            cs = add_context_no_guarantee(src_map[c_file],rang,patch,fi,c_func)
             if not inlined:
                 #Make a candidate based on the changed callee arguments.
                 c = {'file':c_file,'func':c_func}
@@ -404,7 +692,7 @@ def trim_line_candidates(cand,patch):
                 c['type'] = 'func_inline' if inlined else 'func'
                 res_cand.append(c)
             #Add contexts to make the candidate unique.
-            cs = add_context_no_guarantee(src_map[c_file],rang,patch,fi)
+            cs = add_context_no_guarantee(src_map[c_file],rang,patch,fi,c_func)
             for c in cs:
                 c['file'] = c_file
                 c['func'] = c_func
@@ -441,7 +729,7 @@ def trim_line_candidates(cand,patch):
             #by current string comparison based uniqueness test.
             #(2)Proper context can help to reduce match time, a simple cond statement usually leads to many candidates when matching.
             #So, the idea here is, if we find there are "good" contexts (e.g. non-inline function call), we will include it.
-            cs = add_context_no_guarantee(src_map[c_file],rang,patch,fi)
+            cs = add_context_no_guarantee(src_map[c_file],rang,patch,fi,c_func)
             for c in cs:
                 if True:
                 #if c['cont_type'] in ('func_aft','func_bfr'):
@@ -457,7 +745,7 @@ def trim_line_candidates(cand,patch):
             c['type'] = 'cond'
             res_cand.append(c)
         else:
-            cs = add_context_no_guarantee(src_map[c_file],rang,patch,fi)
+            cs = add_context_no_guarantee(src_map[c_file],rang,patch,fi,c_func)
             for c in cs:
                 c['file'] = c_file
                 c['func'] = c_func
@@ -493,7 +781,7 @@ def trim_line_candidates(cand,patch):
             #Uniqueness test.
             if test_uniqueness(src_map[c_file],''.join(src_map[c_file][l_no:l_no_ed+1]),patch,strip=True):
                 #Similar as H2.
-                cs = add_context_no_guarantee(src_map[c_file],(l_no,l_no_ed),patch,fi)
+                cs = add_context_no_guarantee(src_map[c_file],(l_no,l_no_ed),patch,fi,c_func)
                 for c in cs:
                     if True:
                     #if c['cont_type'] in ('func_aft','func_bfr'):
@@ -511,7 +799,7 @@ def trim_line_candidates(cand,patch):
                 c['opts'] = {'trim_tail_abs_jmp':'False'}
                 res_cand.append(c)
             else:
-                cs = add_context_no_guarantee(src_map[c_file],(l_no,l_no_ed),patch,fi)
+                cs = add_context_no_guarantee(src_map[c_file],(l_no,l_no_ed),patch,fi,c_func)
                 for c in cs:
                     c['file'] = c_file
                     c['func'] = c_func
@@ -538,7 +826,7 @@ def _get_main_type(tags):
 
 #We try to add some contexts by heuristic, but the uniqueness of the result cand lines is not guaranteed. 
 #We assume that the main body is of one type.
-def add_context_no_guarantee(src,lines,patch,f_inf):
+def add_context_no_guarantee(src,lines,patch,f_inf,house_func_name):
     (func_st,func_ed) = patch['func_range']
     tags = _get_tags_for_lines(patch['func_range'],f_inf)
     body_tags = set()
@@ -641,17 +929,23 @@ def add_context_no_guarantee(src,lines,patch,f_inf):
     res_c = []
     c_cands_aft_func = filter(lambda x:_get_main_type(tags[x[0]])=='func',c_cands_aft)
     c_cands_bfr_func = filter(lambda x:_get_main_type(tags[x[0]])=='func',c_cands_bfr)
-    def _pick_cont_func(cands,reverse=False):
+    def _pick_cont_func(cands,house_func_name,reverse=False):
         inlined = True
         cands = sorted(cands,key=lambda x:x[0],reverse=reverse)
         for c_func in cands:
             fi = tags[c_func[0]]['func'][0]
+            rang=fi['range']
+            lnos=set([])
+            for ele in rang:
+                lnos.add(ele)
+            #if func_exist_insn_target(fi['name'],house_func_name,1):
+            #if func_exist_insn(fi['name'],house_func_name,lnos):
             if func_exists(fi['name']):
                 yield (c_func,False)
             else:
                 yield (c_func,True)
     if c_cands_aft_func:
-        for (c_func,inlined) in _pick_cont_func(c_cands_aft_func):
+        for (c_func,inlined) in _pick_cont_func(c_cands_aft_func,house_func_name):
             c = {}
             c['line'] = combine_line_range(lines,c_func)
             if inlined:
@@ -669,7 +963,7 @@ def add_context_no_guarantee(src,lines,patch,f_inf):
                 c['cont_type'] = 'func_aft'
                 res_c += [c]
     if c_cands_bfr_func:
-        for (c_func,inlined) in _pick_cont_func(c_cands_bfr_func,reverse=True):
+        for (c_func,inlined) in _pick_cont_func(c_cands_bfr_func,house_func_name,reverse=True):
             c = {}
             c['line'] = combine_line_range(lines,c_func)
             if inlined:
@@ -861,19 +1155,147 @@ def rank_candidate(cands,p_inf):
     return s
 
 func_inf = {}
-def do_pick_sig(patch_inf,pick_cnt=3):
+newpatch=False
+prehousefunc='init'
+pretargetfunc='init'
+bothfound=0
+notbothfound=0
+referencecountfound=0
+targetcountfound=0
+referencecountnotfound=0
+targetcountnotfound=0
+inlineinline=0
+inlinenotinline=0
+notinlineinline=0
+notinlinenotinline=0
+locatepatch=0
+notlocatepatch=0
+reffoundperpatch=0
+refnotfoundperpatch=0
+bothfoundperpatch=0
+notbothfoundperpatch=0
+def do_pick_sig(patch_inf):
     #It's time to decide the source code lines that we can mark to extract signatures.
     cands = generate_line_candidates(patch_inf)
     if not cands:
         print '****** Pure deletion patch or pre-patched.'
         return []
     #We must ensure that the cand functions do exist in src kernel binary, since the extraction is based on the binary.
+    #for cand in cands:
+    #    print '\n',cand,'\n'
+    with open('housefuncexist','a') as f:
+        global prehousefunc
+        global bothfound
+        global notbothfound
+        global referencecountfound
+        global referencecountnotfound
+        global targetcountfound
+        global targetcountnotfound
+        foundperpatch=False
+        bothfound_perpatch=False
+        for cand in cands:
+            #print "L1166 cand['func']: ",cand['func']
+            if cand['func']==prehousefunc:
+                continue
+            f.write(cand['func'])
+            prehousefunc=cand['func']
+            if sym_tabs[0].lookup_func_name(cand['func']) is not None:
+                foundperpatch=True
+                if sym_tabs[1].lookup_func_name(cand['func']) is not None:
+                    bothfound= bothfound+1
+                    bothfound_perpatch=True
+                    referencecountfound=referencecountfound+1
+                    targetcountfound=targetcountfound+1
+                    f.write('   both found'+'\n')
+                else:
+                    notbothfound=notbothfound+1
+                    referencecountfound=referencecountfound+1
+                    targetcountnotfound=targetcountnotfound+1
+                    f.write('   target not found'+'\n')
+            else:
+                househousefunc=find_housefunc(cand['func'])
+                #print "\n L1184 househousefunc:",househousefunc, "cand['func']: ",cand['func']
+                if househousefunc is not None:
+                    foundperpatch=True
+                    househousefuncname=househousefunc.split('--')[-1]
+                    cand['housefunc']=househousefunc
+                    cand['housefuncname']=househousefuncname
+                    f.write('  housefunc:  '+househousefuncname)
+                    if sym_tabs[1].lookup_func_name(househousefuncname) is not None:
+                        bothfound= bothfound+1
+                        bothfound_perpatch=True
+                        referencecountfound=referencecountfound+1
+                        targetcountfound=targetcountfound+1
+                        f.write('   housefunc both found'+'\n')
+                    else:
+                        notbothfound=notbothfound+1
+                        referencecountfound=referencecountfound+1
+                        targetcountnotfound=targetcountnotfound+1
+                        f.write('   housefunc target not found'+'\n')
+                else:
+                    if sym_tabs[1].lookup_func_name(cand['func']) is not None:
+                        notbothfound=notbothfound+1
+                        referencecountnotfound=referencecountnotfound+1
+                        targetcountfound=targetcountfound+1
+                        f.write('   reference not found'+'\n')
+                    else:
+                        notbothfound=notbothfound+1
+                        referencecountnotfound=referencecountnotfound+1
+                        targetcountnotfound=targetcountnotfound+1
+                        f.write('   both not found'+'\n')
+    global reffoundperpatch
+    global refnotfoundperpatch
+    global bothfoundperpatch
+    global notbothfoundperpatch
+    if foundperpatch==True:
+        reffoundperpatch=reffoundperpatch+1
+    else:
+        refnotfoundperpatch=refnotfoundperpatch+1
+    if bothfound_perpatch==True:
+        bothfoundperpatch=bothfoundperpatch+1
+    else:
+        notbothfoundperpatch=notbothfoundperpatch+1
+    def candremove(cand):
+        name=cand['func']
+        if 'housefunc' in cand:
+            name=cand['housefuncname']
+        if not sym_tabs[0].lookup_func_name(name):
+            return True
+        if not sym_tabs[1].lookup_func_name(name):
+            return True
+        return False
+
     if sym_tabs:
-        #cands = filter(lambda x:sym_tabs[0].lookup_func_name(x['func']) is not None,cands)
+        #cands = filter(lambda x:sym_tabs[0].lookup_func_name(x['func']) is not None,cands)      
+        '''
         cands = filter(lambda x:func_exists(x['func']),cands)
-    if not cands:
-        print '****** No function name in the symbol table.'
-        return []
+        cands = filter(lambda x:func_exists_target(x['func']),cands)
+        '''
+        #print "\n\n\n cands before: ", cands
+        cands=[cand for cand in cands if not candremove(cand)]
+        '''
+        for cand in cands:
+            print cand
+            cands.remove(cand)
+        print cands
+        for cand in cands:
+            print "\ncand:",cand
+            name=cand['func']
+            if 'housefunc' in cand:
+                name=cand['housefuncname']
+            print "\nL1209 name: ", name
+            if not sym_tabs[1].lookup_func_name(name):
+                cands.remove(cand)
+        '''
+        '''
+            for i in range(len(sym_tabs)):
+                if not sym_tabs[i].lookup_func_name(name):
+                    cands.remove(cand)
+                    break '''
+        #print "\ncands after ",cands
+        if not cands:
+            print '****** No function name in the symbol table.'
+            return []
     #Do a simple syntax analysis for the functions involved in the patch. 
     global func_inf
     func_inf = parse_funcs_in_patch(patch_inf)
@@ -885,26 +1307,54 @@ def do_pick_sig(patch_inf,pick_cnt=3):
             print '%s %s %s' % (c['file'],c['func'],c['line'])
     #For each candidate change site, we need to do some adjustments, if it's not unique, contexts need to be added,
     #if it contains multiple lines, it may need to be trimmed.
+    #print "L1266: cands: ",cands
     res_cand = refine_line_candidates(cands,patch_inf)
     #Pick up the most promising candidates.
     res_cand = rank_candidate(res_cand,patch_inf)
     for c in res_cand:
         c['arg_cnt'] = patch_inf[(c['file'],c['func'],c['func_range'][0])]['arg_cnt']
     if not res_cand:
-        res_cand = []
-    if dbg_out:
-        print '==============Ranked Candidates=============='
-        for r in res_cand:
-            print '=============='
-            print r
-    return res_cand[:pick_cnt] if pick_cnt > 0 else res_cand
+        return []
+    else:
+        if dbg_out:
+            print '==============Ranked Candidates=============='
+            for r in res_cand:
+                print '=============='
+                print r
+        return res_cand[:3] if len(res_cand) >= 3 else res_cand
+        #return res_cand
 
 sym_tabs = []
+#[patch_list] [reference kernel source] [output_file] [symbol_table,...]
+#zz:adaptation2 [patch_list] [reference kernel source] [output_file] [ref_kernel_image] [ref_kernel_vmlinux][reference symbol_table] [target_kernel_image] [target symbol_table]
 def pick_sig():
     #Load symbol tables if there are any.
     global sym_tabs
-    for f in sys.argv[4:]:
-        sym_tabs.append(Sym_Table(f,dbg_out=dbg_out))
+    #zz
+    #for f in sys.argv[6:]:
+    sym_tabs.append(Sym_Table(sys.argv[6],dbg_out=dbg_out))
+    sym_tabs.append(Sym_Table(sys.argv[8],dbg_out=dbg_out))
+    #if there is no tmp_o generate tmp_o first
+    tmp_o=sys.argv[6].split(".")[0]
+    tmp_o='/home/zheng/fiberweiteng/addr2line/tmp_o'+tmp_o
+    try:
+        ft=open(tmp_o,'r')
+        ft.close()
+    except Exception as ex:
+        print ex
+        print "filename:",tmp_o
+        print "generate new tmp_o!"
+        vmlinux=sys.argv[5]
+        (st,ed)=sym_tabs[0].startandend()
+        image=sys.argv[5]
+        with open('tmp_i','w') as f:
+            for i in range(st,ed,4):
+                f.write('%x\n' % i)
+        with open('tmp_i','r') as fi:
+            with open(tmp_o,'w') as fo:
+                subprocess.call([ADDR2LINE,'-afip','-e',image],stdin=fi,stdout=fo)
+        print "generate new tmp_o completed"
+
     #Deal with patches in patch_list one by one.
     exts = []
     fails = []
@@ -919,13 +1369,20 @@ def pick_sig():
             if patch_name[0] == '#':
                 continue
             print '------------' + patch_name + '----------------'
+            with open('housefuncexist','a') as f:
+                f.write(patch_name+'\n')
             patch_inf = parse_patch(patch_name,sys.argv[2])
+            global locatepatch
+            global notlocatepatch
             if not patch_inf:
                 fails += [patch_name]
                 print '****** Fail to match the patch.'
+                notlocatepatch=notlocatepatch+1
                 continue
-            if dbg_out:
-                print_patch_inf(patch_inf)
+            else:
+                locatepatch=locatepatch+1
+            #if dbg_out:
+                #print_patch_inf(patch_inf)
             cs = do_pick_sig(patch_inf)
             if cs:
                 for c in cs:
@@ -936,9 +1393,38 @@ def pick_sig():
                 fails += [patch_name]
                 print '****** No candidate generated for %s' % patch_name
     #Make the 'ext_list' file
+    global bothfound
+    global notbothfound
+    global referencecountfound
+    global referencecountnotfound
+    global targetcountfound
+    global targetcountnotfound
+    global inlineinline
+    global inlinenotinline
+    global notinlineinline
+    global notinlinenotinline
+    global locatepatch
+    global notlocatepatch
+    global reffoundperpatch
+    global refnotfoundperpatch
+    global bothfoundperpatch
+    global notbothfoundperpatch
+    with open('housefuncexist','a') as f:
+        f.write('opensuccesscountperpatch='+str(get_opensuccesscountperpatch())+'\n')
+        f.write('locatepatch='+str(locatepatch)+'\n'+'notlocatepatch='+str(notlocatepatch)+'\n')
+        f.write('reffoundperpatch='+str(reffoundperpatch)+'\n'+'refnotfoundperpatch='+str(refnotfoundperpatch)+'\n')
+        f.write('bothfoundperpatch='+str(bothfoundperpatch)+'\n'+'notbothfoundperpatch='+str(notbothfoundperpatch)+'\n')
+        f.write('bothfound='+str(bothfound)+'\n'+'notbothfound='+str(notbothfound)+'\n')
+        f.write('referencecountfound='+str(referencecountfound)+'\n'+'referencecountnotfound='+str(referencecountnotfound)+'\n')
+        f.write('targetcountfound='+str(targetcountfound)+'\n'+'targetcountnotfound='+str(targetcountnotfound)+'\n')
+        f.write('inlineinline='+str(inlineinline)+'\n'+'inlinenotinline='+str(inlinenotinline)+'\n')
+        f.write('notinlineinline='+str(notinlineinline)+'\n'+'notinlinenotinline='+str(notinlinenotinline)+'\n')
     with open(sys.argv[3],'w') as f:
         for c in exts:
             s = c['name'] + ' ' + c['func'] + ' '
+            #zz:housefunc of house func
+            if 'house_func' in c:
+                s += ' housefunc:' + c['house_func']        
             #s += '---%s|%d--- ' % (c['type'],c['func_range'][1]-c['func_range'][0])
             #Append the line range
             for l in c['line']:

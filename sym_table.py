@@ -20,6 +20,7 @@ class Sym_Table(object):
                 line = line[:-1] if line[-1] == '\n' else line
                 #Assume the format is "addr type name" 
                 tokens = line.split(' ')
+                print tokens
                 (addr,ty,name) = (int(tokens[0],16),tokens[1],self._trim_func_name(tokens[2]))
                 break
             self.raw_syms += [(addr,ty,name)]
@@ -36,6 +37,13 @@ class Sym_Table(object):
             #Since this is usually in '.bss' section
 
     #Sometimes we can see compiler added suffix in the function names, such as 'func.isra.XX', trim them.
+    def startandend(self):
+	for (addr,ty,name) in self.raw_syms:
+	    if ty in ('T','t'):
+		st=addr
+		break
+	return (st,self.raw_syms[-1][0])
+
     def _trim_func_name(self,name):
         suffix_list = ['isra','constprop']
         tokens = name.split('.')
@@ -76,9 +84,8 @@ class Sym_Table(object):
 
     def probe_arm64_kernel_base(self):
         for (addr,ty,name) in self.raw_syms:
-            if addr >= 0xffff000000000000 and ty in ('T','t'):
+            if addr >= 0xffffff0000000000 and ty in ('T','t'):
                 break
-        print 'Probed image base address: %x' % addr
         return addr
 
     #Decide the code ('t'/'T') segments according to the symbol table file.
