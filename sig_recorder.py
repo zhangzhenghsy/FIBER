@@ -1,7 +1,7 @@
 #!/usr/bin/python
 import angr,simuvex
 import sys,os
-
+import json
 #This class is for recording the formulas required in the signatures when doing the
 #symbolic execution.
 #TODO: avoid the possible conflicts of the breakpoints used here and in Sym_Tracer.
@@ -17,7 +17,9 @@ class Sig_Recorder(object):
         #A root_addr --> (sig,node) mapping.
         self._sig_roots = {}
         self._setup_dicts()
-
+    
+    def __str__(self):
+        return str(self.__class__)+": "+ str(self.__dict__)
     #Set up reference data structures.
     def _setup_dicts(self):
         for sig in self.sigs:
@@ -74,10 +76,16 @@ class Sig_Recorder(object):
             #these types should be processed in other breakpoints.
             return
         #Record the formulas for pre-determined registers.
+        with open('testformulas','a') as f:
+            f.write(hex(ins_addr)+'\n')
         for k in formulas:
             if k in ('type',):
                 continue
-            formulas[k].append(self.tracer.get_formula(state,getattr(state.regs,k))) 
+            formulas[k].append(self.tracer.get_formula(state,getattr(state.regs,k)))
+            with open('testformulas','a') as f:
+                f.write(str(k)+'   ')
+                f.write(str(formulas[k]))
+
         self._post_record(ins_addr,formulas)
 
     def _sig_mem_w_brk(self,state):
@@ -89,9 +97,16 @@ class Sig_Recorder(object):
         if formulas['type'] <> 'store':
             return
         data = self.tracer.get_formula(state,state.inspect.mem_write_expr)
+        #print " state.inspect.mem_write_expr: ",  state.inspect.mem_write_expr
+        #print "data:",data
         addr = self.tracer.get_formula(state,state.inspect.mem_write_address)
+        #print "state.inspect.mem_write_address:", state.inspect.mem_write_address
+        #print "addr: ", hex(addr)
         length = state.inspect.mem_write_length
         formulas['a-d-l'].append((addr,data,length))
+        with open('testformulas','a') as f:
+            f.write(hex(ins_addr)+'\n')
+            f.write(str(formulas['a-d-l']))
         self._post_record(ins_addr,formulas)
 
     def _sig_exit_brk(self,state):
@@ -101,6 +116,7 @@ class Sig_Recorder(object):
         if not self._sig_brk_get_node(ins_addr):
             return
         formulas = self._pre_record(ins_addr)
+        print "_sig_exit_brk formulas:", formulas
         if formulas['type'] <> 'exit':
             #Some basic blocks may end just with a normal data instruction.
             print 'This exit instruction is not of type -exit-: ' + hex(ins_addr) + ', ' + formulas['type']
@@ -118,4 +134,8 @@ class Sig_Recorder(object):
                     formulas['func_name'] = e[1]
         '''
         formulas['a-g-k'].append((addr,guard,jk))
+        with open('testformulas','a') as f:
+            f.write(hex(ins_addr)+'\n')
+            f.write(str(formulas['a-g-k'])+'\n')
+        #print formulas
         self._post_record(ins_addr,formulas)

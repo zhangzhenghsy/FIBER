@@ -76,7 +76,9 @@ def translate_reg_name(reg):
 def make_reg_readable(arch,s):
     global translate_arch
     translate_arch = arch
-    return re.sub(re_reg,translate_reg_name,s)
+    retu=re.sub(re_reg,translate_reg_name,s)
+    return retu
+    #return re.sub(re_reg,translate_reg_name,s)
 
 #Given a instruction address, this function will identify which registers/mems are read/write.
 #This is done by parsing the generated VEX statements, which should work for all archs.
@@ -125,6 +127,7 @@ def get_ins_ops_info(proj,addr,size=None,ins_list=None, opt_level=0):
                 break
             #NOTE: Reg read is special because it's not a statement, but an expression with tag 'Iex_Get'.
             #Similarly, mem read is 'Iex_Load' So to capture then, we need to iterate the expressions.
+            #print "stmt:",stmt
             for exp in stmt.expressions:
                 if exp.tag == 'Iex_Get':
                     #Reg read
@@ -135,6 +138,9 @@ def get_ins_ops_info(proj,addr,size=None,ins_list=None, opt_level=0):
                     #Mem read
                     #Similar to mem write, we only indicate that there is a mem read.
                     info[addr]['load'] = True
+    #print "\n info:",info
+    #print [hex(addr) for addr in info]
+    #print [hex(info[addr]['put_ip']) for addr in info]
     return (info,irsb.jumpkind)
 
 def print_vex_blocks(proj,addrs,opt_level=0):
@@ -231,7 +237,12 @@ def get_all_succs4graph(cfg,g):
 #Given a CFGAcc or CFGFast and a function start address, return the function CFG which is a DiGraph.
 #'simplify' means whether we should optimize the CFG topology to eliminate all absolute control transfer nodes (eg. b,jmp)
 def get_func_cfg(cfg,start,normalize=True,sym_tab=None,proj=None,simplify=False):
-    func = cfg.functions[start]
+    func =cfg.functions[start]
+    #print "\n cfg.functions[start]:"
+    #print hex(start)
+    #print cfg.functions[start]
+    #for func in cfg.functions:
+    #    print hex(func),"    ",cfg.functions[func]
     if func is None:
         print 'No function at %x' % start
         return None
@@ -256,6 +267,8 @@ def get_func_cfg(cfg,start,normalize=True,sym_tab=None,proj=None,simplify=False)
             irsb = proj.factory.block(n.addr,size=n.size,opt_level=0).vex
             if irsb.jumpkind == 'Ijk_Call':
                 name = get_exit_func_name(proj,irsb,sym_tab)
+                #print "name: ", name
+                #print irsb.pp()
                 if name and name in non_ret_funcs:
                     non_rets += [n]
         if non_rets:
@@ -367,12 +380,14 @@ def init_sig_node_formulas(proj,g,n,sym_tab=None):
                 for reg in ins_info[addr]['put']:
                     if reg not in ignore_regs:
                         formulas[addr][reg] = []
+    #print "\n formulas:",formulas
+    #print [hex(addr) for addr in formulas]
     return
 
 #A signature is basically an attributed CFG, we use DiGraph to implement this, which support attributes for nodes/edges.
 #Params: cfg is a DiGraph with normal BBs as nodes.
 def init_signature(proj,cfg,addrs,insns=None,pos=None,negs=None,sym_tab=None):
-    #print [hex(x) for x in addrs]
+    #print("It has %d nodes and %d edges" % (len(cfg.nodes()), len(cfg.edges())))
     nodes = [get_node_by_addr(cfg,x) for x in addrs]
     #Get in_degree and out_degree in original CFG.
     ind = {}
@@ -382,10 +397,14 @@ def init_signature(proj,cfg,addrs,insns=None,pos=None,negs=None,sym_tab=None):
         outd[n.addr] = cfg.out_degree(n)
     #Get subgraph
     og = cfg.subgraph(nodes)
+    #print("It has %d nodes and %d edges" % (len(og.nodes()), len(og.edges())))
+    exit()
     og = copy.deepcopy(og)
     sigs = []
     #Get the weakly connected subgraphs
     for g in networkx.weakly_connected_component_subgraphs(og):
+        #print type(networkx.weakly_connected_component_subgraphs(og))
+        #print("It has %d nodes and %d edges" % (len(g.nodes()), len(g.edges())))
         #Get the DFG for these nodes
         dfgs = get_dfg(proj,[ x for x in g.nodes() if x.size <> 0])
         #This holds all root instruction addrs of the whole signature graph.
@@ -414,10 +433,12 @@ def init_signature(proj,cfg,addrs,insns=None,pos=None,negs=None,sym_tab=None):
                 #We have two filter modes: pos/neg markers based and accurate instruction list based.
                 #If we have DWARF debug information, we should always use the accurate instruction list based filter, which is simply better.
                 root_ins = set(root_ins_d.keys())
+                #print "1 root_ins:",[hex(addr) for addr in root_ins]
                 if insns is not None:
                     root_ins = set(flt_root_ins_acc(g,n,root_ins_d,_get_in_node_addr(n,insns)))
                 elif pos is not None or negs is not None:
                     root_ins = set(flt_root_ins_marker(g,n,root_ins,_get_in_node_addr(n,pos),_get_in_node_addr(n,negs)))
+            #print "2 root_ins:",[hex(addr) for addr in root_ins]
             if not root_ins:
                 void_node.append(n)
                 continue
@@ -1036,7 +1057,7 @@ def get_dfg(proj,bbs):
     # 1 mov x19,x0
     # 2 cbz x19,0xffff6000
     #We want to see that ins 2 depends on ins 1, but with vex optimization, x0 may be stored in t0 previously, and this same t0 will be used directly
-    #in both ins 1 and 2, thus we lost the dependency between ins 1 and 2. (now they both depends on t0, but without relationship between themselves). 
+    #in both ins 1 and 2, thus we lost the dependency between ins 1 and 2. (now they both depends on t0, but without relationship between themselves).
     dfg = proj.analyses.DFG(nodes=bbs,opt_level=0)
     return dfg.dfgs
 
@@ -1053,12 +1074,16 @@ def get_root_ins_addr(dfg):
         preds = set([x.ins_addr for x in preds if type(x).__name__ == 'Dfg_Node'])
         curs = addrs.get(r.ins_addr,set())
         addrs[r.ins_addr] = curs.union(preds)
+    #for addr in addrs:
+    #    print hex(addr)
+    #    print [hex(a)for a in addrs[addr]]
     return addrs
 
 #Given a DFG (a DiGraph), return a list of the root nodes that don't depend on other statement nodes (but can still
 #depend on other expr or constant nodes).
 def get_root_nodes_from_dfg(g):
     roots = []
+    #print "\n g.nodes():",g.nodes()
     for node in g.nodes():
         #All statement nodes are wrapped into 'Dfg_Node's
         if type(node).__name__ <> 'Dfg_Node':
@@ -1105,6 +1130,8 @@ def get_node_addrs_between(cfg,pos,negs,**kwargs):
                 continue
             tmp = set()
             get_all_preds(cfg,n_neg,tmp)
+            #print "neg:", hex(neg)
+            #print "\n tmp:",set([hex(addr) for addr in tmp])
             #If the negative marker is just at the start of a node, then exclude it if the option is set.
             if (neg == n_neg.addr and ignore_leading_neg) or drop_neg_node:
                 tmp.remove(n_neg.addr)

@@ -111,6 +111,8 @@ def graph_match(sig,proj,cfg,sym_tab=None):
     prep_node_attributes_for_match(proj,cfg,sym_tab=sym_tab)
     #Do the subgraph match, node_matcher() is a simple node-level semantic matcher.
     digm = isomorphism.DiGraphMatcher(cfg,sig,node_match=node_matcher)
+    #for node in sig.nodes():
+    #    print sig.node[node]
     candidates = []
     for it in digm.subgraph_isomorphisms_iter():
         #Each iter here is a possible match (i.e. a candidate)
@@ -123,14 +125,22 @@ def graph_match(sig,proj,cfg,sym_tab=None):
         #The 'it' is the mapping from the whole func_cfg to original sig, now we just want the mapping from
         #candidate sig to original sig.
         mapping = {}
+        proj2=sys.argv[4]
+        symbol_table2 = Sym_Table(sys.argv[5])
+        BASE = symbol_table2.probe_arm64_kernel_base()
+        code_segments = symbol_table2.get_code_segments(BASE)
+        proj2=load_kernel_image(sys.argv[1],ARCH,BASE,segments=code_segments)
         for k in it:
             #L: Candidates R: Original Signature
             mapping[get_node_by_addr(c_sig,k.addr)] = it[k]
+            #nc=get_node_by_addr(c_sig,k.addr)
+            #no=it[k]
         #show_signature(c_sig)
         #Do some preliminary filtering before the real symbolic execution.
         if pre_filter(c_sig,sig,mapping):
             candidates.append((c_sig,mapping))
-    print '%d candidates after graph_match()' % len(candidates)
+    #print '%d candidates after graph_match()' % len(candidates)
+    print "mapping: ", mapping
     return candidates
 
 #Compare two function name strings, we should give this some flexibility (not strict string comparison).
@@ -486,15 +496,18 @@ def semantic_match(mapping,cand,sig,options):
 #cfg_acc --> Angr's accurate cfg
 def do_match_sig(sig,proj,cfg,cfg_bounds,cfg_acc,sym_tab,options):
     #First do a subgraph match that is mainly based on the graph syntactics.
+    #print "cfg_bounds: ", [hex(addr) for addr in cfg_bounds]
     candidates = graph_match(sig,proj,cfg,sym_tab=sym_tab)
     if not candidates:
         print 'No candidates after initial graph match'
         return (False,0)
     candidate_sigs = [x for (x,y) in candidates]
+    #print "candidate_sigs:nodes ", [hex(n.addr) for n in candidate_sigs[0].nodes()]
     #Now basically we need to do the symbolic execution from function entry to each of the candidates and
     #collect semantic formulas along the process.
     exe = Sym_Executor(dbg_out=True,options=options)
     targets = get_cfg_bound(candidate_sigs)
+    #print [hex(addr) for addr in targets]
     smg = exe.try_sym_exec(proj=proj,cfg=cfg_acc,cfg_bounds=cfg_bounds,targets=targets,start=cfg_bounds[0],new_tracer=True,new_recorder=True,sigs=candidate_sigs,sym_tab=sym_tab)
     matched = 0
     for (cand,mapping) in candidates:
@@ -547,7 +560,9 @@ def match_sig():
             if line[0] == '#':
                 continue
             tks = line.split(' ')
+            #print tks
             cve = tks[0][tks[0].rfind('/')+1:tks[0].rfind('-sig')]
+            #print cve
             applicable = True
             if len(tks) > 1:
                 if cve in res_dic:
@@ -563,7 +578,7 @@ def match_sig():
                 print 'No sig file: ' + tks[0]
                 miss_sigs += [tks[0]]
                 applicable = False
-                continue
+                continue 
             func_name = sig.graph['func_name']
             sig_name = sig.graph['sig_name']
             default_options = sig.graph['options']
@@ -586,13 +601,13 @@ def match_sig():
                 retry_cnt = 1
                 while retry_cnt > 0:
                     cnt = 0
-                    try:
-                        (collision,cnt) = do_match_sig(sig,b,func_cfg,[addr,addr+size],cfg_acc,symbol_table,default_options)
-                    except:
+                    #try:
+                    (collision,cnt) = do_match_sig(sig,b,func_cfg,[addr,addr+size],cfg_acc,symbol_table,default_options)
+                    '''except:
                         traceback.print_exc()
                         if cnt == 0:
                             cnt = -1
-                        break
+                        break '''
                     if collision:
                         print 'Addr collision when matching, retry...'
                     else:

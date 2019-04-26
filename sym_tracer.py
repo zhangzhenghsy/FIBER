@@ -3,7 +3,6 @@ import angr,simuvex,claripy
 import sys,os
 import copy,re
 from utils_sig import *
-
 #This class can record information along symbolic execution and generate origination formula for any symbolic variable at any location. 
 class Sym_Tracer(object):
     def __init__(self,symbol_table=None,dbg_out=False,collision_retry_time=16):
@@ -21,18 +20,26 @@ class Sym_Tracer(object):
         self.symbol_table = symbol_table
         self.dbg_out = dbg_out
         self.addr_collision = False
+    
+    def __str__(self):
+        return str(self.__class__)+": "+ str(self.__dict__)
 
     def _sym_capture(self,state):
+        #print str(state.inspect.symbolic_expr)
         if self.dbg_out:
             print '[Sym Create] ' + make_reg_readable(state.arch,str(state.inspect.symbolic_expr)) + ' @ ' + hex(state.history.recent_ins_addrs[-1])
         name = state.inspect.symbolic_name
+        print "name:  ", name
+        print "expr:  ", state.inspect.symbolic_expr 
         #This *should* be impossible, but if it happens, I made some serious mistakes. 
         if self._sym_map.has_key(name):
             print 'sym_capture: multiple entries for the same value: ' + name
             return
         if re.match(re_reg,name) is not None:
+            #print "re_reg"
             return
         elif re.match(re_mem,name) is not None:
+            #print "name: ", name
             addr = int(name.split('_')[1],base=16)
             #Look up the addr_conc_buf to match the address
             index = -1
@@ -49,7 +56,10 @@ class Sym_Tracer(object):
                 (a,e,h) = self._addr_conc_buf.pop(index)
                 expr = copy.deepcopy(e)
                 self._sym_map[name] = expr
+            #print "(a,e,h):", (hex(a),e,(hex(add) for add in h))
+            #print "self._sym_map:", self._sym_map
         elif re.match(re_ret,name) is not None:
+            print "re_ret"
             #We need to record some information about the call
             action = None
             for ao in state.history.recent_actions:
@@ -58,6 +68,8 @@ class Sym_Tracer(object):
             if action is not None:
                 #action.target is a SimActionObject
                 target_ast = copy.deepcopy(action.target.ast)
+                #print "name:" , name
+                #print "target_ast:", target_ast
                 #TODO: I'm not sure how useful 'insn_addr' is currently, so leave it blank for now.
                 #If we want it in the future, keep in mind that call instruction will be the last one of an IRSB.
                 self._sym_map[name] = (target_ast,None)
@@ -86,6 +98,7 @@ class Sym_Tracer(object):
         his = tuple([x for x in state.history.bbl_addrs])
         for addr in mem_addr:
             self._addr_conc_buf = self._addr_conc_buf + [(addr,expr,his)]
+        #print (hex(addr),expr,[hex(addr) for addr in his])
         if hasattr(strategy,'collision'):
             self.addr_collision = strategy.collision
     
@@ -138,6 +151,7 @@ class Sym_Tracer(object):
         if not self._is_ast_processed(expr):
             self.get_formula(state,expr,in_place=True)
             expr.hz_extra['processed'] = True
+            #print '[' + expr_str[expr_str.find(' ')+1:-1] + ']#' + ast.args[0].split('_')[3]
         ast.hz_extra['mem_formula'] = expr
         expr_str = expr.hz_repr() if isinstance(expr,claripy.ast.Base) else str(expr)
         #We assume the name is: mem_[addr]_N_[size]
@@ -195,7 +209,7 @@ class Sym_Tracer(object):
         if state is None or ast is None:
             return None
         #if self.dbg_out:
-        #    print 'I: ' + str(ast)
+            #print 'I: ' + str(ast)
         ast_c = copy.deepcopy(ast) if not in_place else ast
         # It seems we only need to tell the originations of the symbolic nodes in the AST. 
         for leaf_ast in ast_c.recursive_leaf_asts:
@@ -204,6 +218,7 @@ class Sym_Tracer(object):
                 continue
             if not leaf_ast.symbolic:
                 continue
+            #print "leaf_ast: ", leaf_ast, " leaf_ast name:", leaf_ast.args[0]
             #For symbolic AST, args[0] should be its name. Symbolic value from a register will have the prefix 'reg' in its name,
             #symbolic value from memory will have a prefix 'mem'. We aim to obtain the expression behind the memory address,
             #e.g. X19+0x24 = 0xXXXXXXXX, we want to know the left side, however the sym name will only contain the right side.
@@ -224,7 +239,7 @@ class Sym_Tracer(object):
                 self._process_sym_unk(state,leaf_ast)
         ast_c.hz_extra['processed'] = True
         #if self.dbg_out:
-        #    print 'O: ' + str(ast_c)
+            #print 'O: ' + str(ast_c)
         #Below code is for deepcopy debugging, for some reasons, the deepcopy doesn't work very well here
         #because I find that the copy still shares some leaf asts with original ast. So we'd better not
         #modify any fields in the original AST instance other than 'hz_extra' which is added by us.
